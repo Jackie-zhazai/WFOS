@@ -193,9 +193,4 @@ Python 3.12，三步 —— 安装、`ruff check .`、`pytest -q`。没有矩阵
 - **候选库和正式 skill 库是同一个 SQLite 文件**：隔离由代码路径保证，不是存储隔离。
 - **没有真正的 LLM Judge**，judge 目前是可选且非 LLM 的。
 
-## 文档
 
-- [`docs/architecture.md`](docs/architecture.md) —— 文件架构 / 分层 / 对象关系 / 设计思想 / 执行链路 / 架构图
-- [`docs/operations.md`](docs/operations.md) —— CLI 教程 / 从零运行 / 测试体系 / 安全边界
-- [`docs/reference.md`](docs/reference.md) —— 数据库结构 / 关键缺陷 / 技术亮点 / 当前限制 / 答辩讲解
-- [`.claude/history.md`](.claude/history.md) —— 每阶段做了什么、修了哪些真 bug
