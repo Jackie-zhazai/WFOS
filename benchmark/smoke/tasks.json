@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "_comment": [
+    "最小可运行任务：验证 Task → Run → Trace → Evaluate 这条基本链路。",
+    "必须快、必须离线，所以只有两条最短的完整流程。",
+    "任务定义只此一份：benchmark 是 TaskSpec 的唯一来源，",
+    "evaluator 不得从 prompt 猜 expected，运行过程也不得改这里的定义。"
+  ],
+  "cases": [
+    {
+      "id": "feature-happy-path",
+      "description": "功能开发全链路：方案 → 风险 → 审批 → 实现 → 构建测试 → 回归 → 沉淀",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 12,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nassert compute(2) == 4, \"compute(2)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "terminalStatus": "completed",
+        "finalState": "completed",
+        "completedFullChain": true,
+        "writesOutsidePlan": 0,
+        "noStateRanTwice": true,
+        "leaseReleased": true,
+        "auditClean": true,
+        "promptWithinBudget": true,
+        "escalatedToHuman": false,
+        "stepsWithinBudget": true
+      }
+    },
+    {
+      "id": "bugfix-happy-path",
+      "description": "问题修复全链路：诊断 → 根因 → 置信度 → 修复方案 → 修复 → 验证 → 沉淀",
+      "kind": "bugfix",
+      "request": "修复 compute 结果不对的 bug，重新实现 compute 使其正确",
+      "stepBudget": 16,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nassert compute(2) == 4, \"compute(2)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "terminalStatus": "completed",
+        "completedFullChain": true,
+        "noStateRanTwice": true,
+        "leaseReleased": true,
+        "auditClean": true
+      }
+    }
+  ]
+}

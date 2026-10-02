@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "smoke-model-sweep",
+  "version": 1,
+  "name": "冒烟层：默认臂 vs 另一模型 + 关闭失败升级",
+  "description": "同一个任务在两个配置下各跑一次，用来验证矩阵展开、cell 隔离与比较。",
+  "suite": "benchmark/smoke",
+  "matrix": {
+    "model": ["mock", "mock-alt"],
+    "config": [null, {"repeated_failure_threshold": 0}]
+  },
+  "repetitions": 1,
+  "metadata": {"owner": "p4-acceptance"}
+}

@@ -1,0 +1,44 @@
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# ── 虚拟环境 ──────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── 工具缓存 ──────────────────────────────────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+
+# ── 凭据：绝不入库 ────────────────────────────────────────────────────────
+# 这个仓库从不存放凭据。provider 的 key 只从环境变量读（见 wfos/llm/factory.py
+# 的 PROVIDER_KEY_ENV 与 wfos/config.py），不入库、不落盘、不写进任何 artifact。
+# 下面这些是防御性的：万一有人本地建了这些文件，也不该被提交。
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials*
+config.local*
+*.secret
+
+# ── 本地运行状态：可重新生成，不是证据 ────────────────────────────────────
+.data/
+*.db
+*.sqlite
+*.sqlite3
+
+# ── 运行产生的日志 ────────────────────────────────────────────────────────
+# 注意：**不要**把整个 artifacts/ 忽略掉。那里的 accept_final.py / accept_p*.py /
+# mutate_p*.py / check_docs.py 是工程的验收与变异证据，属于要交付的内容。
+# 被忽略的只是它们**跑出来的**日志与临时库。
+artifacts/**/*.log
+artifacts/**/*.db
+
+# `artifacts/harness-baseline.json` **不在**忽略之列：它是冻结的可靠性基线，
+# `wfos baseline check` 默认就读这个文件，属于要提交的产物。

@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 1,
+  "_comment": [
+    "覆盖现有 feature/bugfix 核心能力：审批、失败分类、重试升级、父子回归、恢复契约。",
+    "用来检测旧能力退化 —— 这些能力此前已经能跑通，任何一条变红都是退步。",
+    "任务定义只此一份：benchmark 是 TaskSpec 的唯一来源，",
+    "evaluator 不得从 prompt 猜 expected，运行过程也不得改这里的定义。"
+  ],
+  "cases": [
+    {
+      "id": "delete-needs-approval-and-writes-nothing",
+      "description": "删除操作命中审批门：停在 waiting_approval，且磁盘上什么都没变",
+      "kind": "feature",
+      "request": "删除 app.py 中废弃的 compute 函数",
+      "stepBudget": 8,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "print(\"PASS\")\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "terminalStatus": "waiting_approval",
+        "approvalBlocked": true,
+        "wroteNothing": true,
+        "writesOutsidePlan": 0
+      }
+    },
+    {
+      "id": "build-error-is-classified",
+      "description": "真实语法错误被报告为构建失败并归类为 build_error，而非抛出异常",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 12,
+      "fixture": {
+        "app.py": "def compute(x:\n    return x * 2\n",
+        "check.py": "print(\"PASS\")\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "failureClasses": "build_error",
+        "escalatedToHuman": true,
+        "terminalStatus": "waiting_approval"
+      }
+    },
+    {
+      "id": "repeated-test-failure-escalates-to-human",
+      "description": "同类测试失败重复出现时升级人工，而不是把重试预算烧完",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 12,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(3) == 9, \"compute(3)\"\nprint(\"PASS: compute(3)==\", compute(3) == 9)\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "failureClasses": "test_failure",
+        "escalatedToHuman": true,
+        "terminalStatus": "waiting_approval"
+      }
+    },
+    {
+      "id": "regression-spawns-child-bugfix",
+      "description": "回归验证失败时派生 Bugfix 子流程，父流程进入 waiting_child",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 12,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nassert compute(2) == 4, \"compute(2)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n",
+        "regressions.txt": "core\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "terminalStatus": "waiting_child",
+        "childRuns": 1,
+        "leaseReleased": true
+      }
+    },
+    {
+      "id": "resume-reuses-persisted-steps",
+      "description": "被打断的运行恢复时复用已持久化步骤：断言不重跑任何状态，且重新进入审批门（而不是从头再来）。用删除场景是因为它跑到 waiting_approval 就停住，正好留下一个未结束的运行供恢复；已完成的运行现在根本不该被恢复。",
+      "kind": "feature",
+      "request": "删除 app.py 中废弃的 compute 函数",
+      "stepBudget": 8,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "print(\"PASS\")\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        },
+        {
+          "op": "interrupt"
+        },
+        {
+          "op": "resume"
+        }
+      ],
+      "expect": {
+        "resumeStatus": "full-valid",
+        "terminalStatus": "waiting_approval",
+        "noStateRanTwice": true,
+        "stepsWithinBudget": true,
+        "stepsExecuted": 4
+      }
+    },
+    {
+      "id": "resume-is-refused-when-a-key-file-drifts",
+      "description": "关键文件在运行之外被改动后，恢复被 fail-closed 拒绝并写明原因。用删除场景是必需的：方案文件只在运行『没有写过它』时才是可漂移的关键文件，而 happy path 的运行恰好写了自己唯一的方案文件。",
+      "kind": "feature",
+      "request": "删除 app.py 中废弃的 compute 函数",
+      "stepBudget": 8,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "print(\"PASS\")\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        },
+        {
+          "op": "mutate",
+          "files": {
+            "app.py": "def compute(x):\n    return x * 3\n"
+          }
+        },
+        {
+          "op": "resume"
+        }
+      ],
+      "expect": {
+        "resumeStatus": "workspace-drift",
+        "resumeRefused": true,
+        "terminalStatus": "failed"
+      }
+    },
+    {
+      "id": "resume-does-not-rewrite-a-finished-run",
+      "description": "已结束的运行是记录，不是可复活的候选：即使关键文件真的漂移了，对 completed 运行执行 resume 也必须原样返回——既不改状态，也不落 resume 判定。这条曾经不成立：指纹校验跑在终态检查之前，一个 resume 就能把 completed 改写成 failed。",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 12,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nassert compute(2) == 4, \"compute(2)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        },
+        {
+          "op": "mutate",
+          "files": {
+            "app.py": "def compute(x):\n    return 'external edit'\n"
+          }
+        },
+        {
+          "op": "resume"
+        }
+      ],
+      "expect": {
+        "terminalStatus": "completed",
+        "resumeStatus": "",
+        "resumeRefused": false
+      }
+    },
+    {
+      "id": "regression-is-repaired-by-child",
+      "description": "回归验证失败时派生 Bugfix 子流程，父流程进入 waiting_child",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 32,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nassert compute(2) == 4, \"compute(2)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n",
+        "regressions.txt": "core\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        },
+        {
+          "op": "advanceChild"
+        },
+        {
+          "op": "resumeChild"
+        }
+      ],
+      "expect": {
+        "childRuns": 1,
+        "leaseReleased": true,
+        "noStateRanTwice": true,
+        "auditClean": true
+      },
+      "_comment": "父-子回归的闭环：不只是派生，而是让子流程修好、父流程恢复并完成。原有的用例停在 waiting_child，所以从未有一个运行真正从 regression 里恢复过来 —— 而恢复证据正是 skill 候选唯一的来源。"
+    }
+  ]
+}

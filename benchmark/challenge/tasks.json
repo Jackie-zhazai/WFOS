@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "_comment": [
+    "多步骤、跨运行、需要真实大脑的任务。",
+    "第一阶段只建立结构与少量真实 case，不追求数量。",
+    "任务定义只此一份：benchmark 是 TaskSpec 的唯一来源，",
+    "evaluator 不得从 prompt 猜 expected，运行过程也不得改这里的定义。"
+  ],
+  "cases": [
+    {
+      "id": "memory-from-a-previous-run-reaches-the-next-prompt",
+      "description": "跨运行记忆：第一条运行结束后把「它留下的文件摘要」记进记录，第二条运行在同一批文件上时把它注入 prompt。必须用两次运行——记忆是在运行结束时写的，单条运行看不到自己的记忆。",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 12,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nassert compute(2) == 4, \"compute(2)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        },
+        {
+          "op": "newRun"
+        },
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "terminalStatus": "completed",
+        "memoryInjected": true,
+        "memoryWithheld": 0,
+        "stepsWithinBudget": true
+      }
+    },
+    {
+      "id": "memory-is-withheld-when-its-files-changed",
+      "description": "记忆的新鲜度：第一条运行之后 app.py 被改动，第二条运行就必须扣留这条记忆——它描述的状态已经不存在了。扣留的事实还要留在审计里，否则与『从未记录过』无法区分。",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "stepBudget": 12,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nassert compute(2) == 4, \"compute(2)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        },
+        {
+          "op": "mutate",
+          "files": {
+            "app.py": "def compute(x):\n    return x * 2\n\n\ndef added_by_hand():\n    return 1\n"
+          }
+        },
+        {
+          "op": "newRun"
+        },
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "terminalStatus": "completed",
+        "memoryInjected": false,
+        "memoryWithheld": 1
+      }
+    },
+    {
+      "id": "live-feature-smoke",
+      "_comment": "真实 provider 验收用；`wfos baseline live` 才会跑它。断言的是**性质**而非结果——真实模型不确定（首轮实测 5 次尝试只成功 1 次），所以只要求：跑到一个终态、租约释放、没有状态被执行两次、审计干净、以及**失败必须给出可分类的原因**。它不进冻结基线：把一个不确定的运行冻进 artifact，下次 check 就会拿另一个运行来比，必然飘红。",
+      "description": "真实 provider 下的功能流程冒烟（性质断言）",
+      "kind": "feature",
+      "request": "新增一个用户模块，在 app.py 中追加 feature_user() 函数",
+      "brain": "live",
+      "stepBudget": 24,
+      "fixture": {
+        "app.py": "def compute(x):\n    return x * 2\n",
+        "check.py": "from app import compute\n\nassert compute(1) == 2, \"compute(1)\"\nprint(\"PASS: compute(1)==\", compute(1) == 2)\n"
+      },
+      "actions": [
+        {
+          "op": "advance"
+        }
+      ],
+      "expect": {
+        "reachedTerminal": true,
+        "leaseReleased": true,
+        "noStateRanTwice": true,
+        "auditClean": true,
+        "failuresAreClassified": true
+      }
+    }
+  ]
+}

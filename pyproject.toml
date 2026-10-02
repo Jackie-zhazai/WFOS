@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wfos"
+version = "1.0.0"
+description = "An Agent Harness for reproducible execution, independent evaluation, benchmarking, experimentation, and evidence-driven skill optimization."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.0.0",
+    "pydantic>=2.0",
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.6"]
+
+[project.scripts]
+wfos = "wfos.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["wfos*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".data", ".pytest_cache"]
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "B", "C4", "UP", "SIM"]
+
+# One rule is off, and only because applying it is reformatting rather than
+# repair. Everything that catches a defect — unused names, shadowed bindings,
+# real bug patterns, one statement per line — is on.
+#
+#   E501  Most hits are Chinese comments and prompt strings, which ruff measures
+#         at two columns per character, so the rule fires on lines that read
+#         fine; the remainder are SQL column lists that must stay one string.
+#         Reflowing those is `ruff format`'s job, not a linter's.
+ignore = ["E501"]
+

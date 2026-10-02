@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "recovery-regression",
+  "version": 1,
+  "name": "回归闭环：父-子修复后父流程完成",
+  "description": "跑回归层，让子流程修好回归、父流程恢复并完成 —— 这样才有真实的 recovery 证据可提议 skill。",
+  "suite": "benchmark/regression",
+  "matrix": {},
+  "repetitions": 1
+}
