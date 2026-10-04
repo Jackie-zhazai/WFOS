@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import uuid
@@ -17,6 +18,7 @@ from typing import Any
 from .. import events
 from ..agents.architect import ArchitectAgent
 from ..agents.base import RUN_RECORD, AgentError, BaseAgent
+from ..agents.chat import ChatAgent
 from ..agents.curator import CuratorAgent
 from ..agents.implementer import ImplementerAgent
 from ..agents.investigator import InvestigatorAgent
@@ -225,8 +227,12 @@ class Harness:
             # provider this process never contacts.
             self.llm, self.routed = llm, {}
         else:
+            # `roles=` is the set a route may name, not the set of state-machine
+            # agents — it has to include `assistant` or `[llm.routing] assistant =
+            # "strong"` would be refused as a typo. `AGENT_CLASSES` stays at five.
             self.llm, self.routed = build_routed_adapters(
-                cfg.llm, capabilities=self.capabilities, roles=AGENT_CLASSES)
+                cfg.llm, capabilities=self.capabilities,
+                roles={**AGENT_CLASSES, "assistant": ChatAgent})
         root = cfg.project_root
         agent_kw = {
             "repeated_call_threshold": cfg.harness.repeated_call_threshold,
@@ -239,6 +245,15 @@ class Harness:
             role: cls(self.routed.get(role, self.llm), self.gateway, root, **agent_kw)
             for role, cls in AGENT_CLASSES.items()
         }
+        # Deliberately **not** in `self.agents`. Three things read that mapping and
+        # all three should keep seeing exactly the state-machine roles: `test_routing`
+        # asserts its key set, `identity.identity_hash` folds its adapters into a
+        # run's fingerprint (a sixth entry would move every existing run's hash and
+        # churn the frozen benchmark digest), and `_record_failure` resolves a failing
+        # state's agent through it. The chat turn reaches its agent through
+        # `self.chat_agent` instead.
+        self.chat_agent = ChatAgent(
+            self.routed.get("assistant", self.llm), self.gateway, root, **agent_kw)
         # One asyncio lock per run, so concurrent callers in this process queue
         # up instead of interleaving two advances of the same run.
         self._run_locks: dict[str, asyncio.Lock] = {}
@@ -275,7 +290,11 @@ class Harness:
         once. Left unset, a run gets a session of its own.
         """
         kind = kind or route(text)
-        if kind not in ("feature", "bugfix"):
+        # The vocabulary is the machine table, not a literal pair: `chat` is a real
+        # kind (it has a machine), and a kind with no machine is refused here rather
+        # than at `sm.initial_state` two frames down. A route that finds nothing
+        # still returns None, so an unrouted request is still an error.
+        if kind not in sm.MACHINES:
             raise ValueError(f"无法为请求路由到已知流程类型: {text[:40]!r}")
         first = re.split(r"[\n。；;]", text, maxsplit=1)[0][:60]
         run = self.repo.create_run(
@@ -289,6 +308,156 @@ class Harness:
                    origin=run["origin"], task_id=task_id or "",
                    task_version=task_version if task_version is not None else "")
         return self.repo.get_run(run["id"])
+
+    # ------------------------------------------------------------------ chat
+    # How many past turns a chat prompt carries. The full transcript stays in the
+    # trace either way; this is only the window the model is shown.
+    CHAT_HISTORY_TURNS = 20
+
+    def chat_history(self, run_id: str, *,
+                     turns: int | None = None) -> list[dict[str, str]]:
+        """This session's turns, oldest first, read back out of the trace.
+
+        Rebuilt rather than stored on the run. `events` is the append-only record
+        *and* the redacted one (`repo.add_event` cleans its payload; `update_run`
+        does not), so keeping the transcript in a `runs.payload` column instead
+        would put a pasted secret in the database verbatim and rewrite the whole
+        conversation on every turn. The trace already holds both halves — the
+        person's words and the assistant's — because that is what a transcript is.
+        """
+        limit = self.CHAT_HISTORY_TURNS if turns is None else turns
+        out: list[dict[str, str]] = []
+        for event in self.repo.events_for_run(run_id):
+            kind = event["type"]
+            if kind == events.CHAT_USER:
+                role = "user"
+            elif kind == events.CHAT_ASSISTANT:
+                role = "assistant"
+            else:
+                continue
+            out.append({"role": role,
+                        "text": str(event["payload"].get("text") or "")})
+        return out[-limit:] if limit > 0 else out
+
+    @staticmethod
+    def _render_conversation(turns: list[dict[str, str]]) -> str:
+        lines = [f"[{'用户' if t['role'] == 'user' else '助手'}] {t['text']}"
+                 for t in turns]
+        return "\n".join(lines)
+
+    async def converse(self, run_id: str, text: str) -> dict:
+        """One turn of an interactive session: record what was asked, let the
+        assistant work, record what it answered.
+
+        Not a state transition, and deliberately not routed through `advance`: a
+        conversation has no machine to move through. Everything else is the same
+        machinery a state gets — the execution lease (a turn makes up to
+        `ChatAgent.max_rounds` model calls and must not lose its claim mid-flight),
+        the same context assembly, the same gateway, the same trace. A turn is a
+        step; it is just a step whose outcome is a sentence rather than a
+        transition suggestion.
+        """
+        run = self.repo.get_run(run_id)
+        if run is None:
+            raise ValueError(f"未找到运行 {run_id}")
+        if run["kind"] != "chat":
+            raise ValueError(f"运行 {run_id} 不是交互会话（kind={run['kind']!r}）")
+        if run["status"] in TERMINAL_STATUSES:
+            raise ValueError(f"运行 {run_id} 已经结束（{run['status']}）")
+
+        exhausted = self._budget_exhausted(run)
+        if exhausted:
+            self._stop_for_budget(run, exhausted)
+            return {"runId": run_id, "reply": "", "ok": False,
+                    "reason": exhausted, "pendingApprovals": []}
+
+        lock = self._lock_for(run_id)
+        async with lock:
+            owner = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+            lease_seconds = self._lease_seconds()
+            if not self.repo.claim_run(run_id, owner, lease_seconds):
+                held = self.repo.get_run(run_id)
+                raise RunLockedError(
+                    f"运行 {run_id} 正被 {held.get('owner')} 推进"
+                    f"（租约至 {held.get('lease_until')}），本次未执行任何一轮")
+            heartbeat = _LeaseHeartbeat(self.repo, run_id, owner, lease_seconds)
+            try:
+                return await self._converse_claimed(run, text)
+            finally:
+                await heartbeat.stop()
+                self.repo.release_run(run_id, owner)
+
+    async def _converse_claimed(self, run: dict, text: str) -> dict:
+        run_id = run["id"]
+        self.repo.set_status(run_id, "running")
+        # The person's words go in first: everything after this point is the
+        # assistant reading a context that already contains the question.
+        self._emit(run, events.CHAT_USER, actor=events.ACTOR_HUMAN, text=text)
+
+        # Only rows written from here on belong to this turn. `tool_calls` is
+        # per-run and the session is long-lived, so the id is the boundary.
+        before = max((t["id"] for t in self.repo.tool_calls(run_id)), default=0)
+
+        run = self.repo.get_run(run_id)
+        ctx = self._build_ctx(run)
+        history = self.chat_history(run_id)
+        if history:
+            ctx["conversation"] = self._render_conversation(history)
+
+        failure = ""
+        try:
+            output = await self.chat_agent.run(ctx)
+            reply = str(output.get("reply") or "")
+        except AgentError as e:
+            # A turn that could not finish is a sentence in the conversation, not
+            # the end of the session: one request burning its rounds says nothing
+            # about whether the next request will work.
+            failure = str(e)
+            reply = f"（这一轮没能完成：{e}）"
+
+        event_id = self._emit(run, events.CHAT_ASSISTANT, actor=events.ACTOR_MODEL,
+                              text=reply)
+        record = BaseAgent.record(ctx)
+        self.repo.add_step(
+            run_id, "chat", self.chat_agent.role,
+            {"reply": reply, **({"failed": True} if failure else {})},
+            status="failed" if failure else "done", error=failure or None,
+            failure_class="agent_no_output" if failure else None,
+            input_json={k: v for k, v in ctx.items()
+                        if k not in ("gateway", RUN_RECORD)},
+            event_id=event_id, metrics=self._step_metrics(self.chat_agent, record))
+
+        blocked = self._request_approvals_for(run, since=before)
+        return {"runId": run_id, "reply": reply, "ok": not failure,
+                "reason": failure, "pendingApprovals": blocked}
+
+    def _request_approvals_for(self, run: dict, *, since: int) -> list[str]:
+        """Turn this turn's policy refusals into approvals a person can act on.
+
+        A refused tool call is already recorded — the gateway writes the row and
+        the trace event — but nothing would ever let a human un-refuse it: the
+        delete gate reads the `approvals` table, and in a state machine the only
+        thing that writes there is the plan-violation escalation. A conversation
+        has no plan to violate, so the refusal would otherwise be permanent.
+
+        The action is `<tool>:<path>` and not the bare tool name: the checker tries
+        both, and a bare name would unlock that tool for *every* path — one
+        approval would authorise deleting the whole project.
+        """
+        created: list[str] = []
+        for row in self.repo.tool_calls(run["id"]):
+            if row["id"] <= since or row.get("error_code") != "approval_required":
+                continue
+            try:
+                args = json.loads(row.get("args_json") or "{}")
+            except ValueError:
+                args = {}
+            path = str(args.get("path") or "")
+            action = f"{row['tool']}:{path}" if path else str(row["tool"])
+            self._ensure_approval(run, action,
+                                  {"path": path, "reason": "交互式会话中被策略拦下"})
+            created.append(action)
+        return created
 
     def _lease_seconds(self) -> int:
         """How long one claim stays good for, before anyone else may take over.
@@ -358,6 +527,13 @@ class Harness:
     async def _advance_claimed(self, run_id: str, max_loops: int, owner: str,
                                heartbeat: _LeaseHeartbeat) -> dict:
         run = self.repo.get_run(run_id)
+        if run["kind"] not in sm.ADVANCEABLE_KINDS:
+            # Fail-closed and inert: a chat session is stepped by `converse`, one
+            # turn at a time, and has no `STATE_AGENT` entry. Without this, any
+            # caller that reaches `advance` with a chat run — `wfos resume`,
+            # `resume_after_child`, `delegate`, a task file — would KeyError inside
+            # `_run_state`, mark the run failed, and escape as a traceback.
+            return run
         refused = self._reuse_refused(run)
         if refused:
             # Checked here, inside the lease, and *before* the status flips to

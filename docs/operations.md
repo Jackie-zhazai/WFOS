@@ -119,7 +119,31 @@ exit=1
 
 ## 4. CLI 教程
 
-### 4.1 `wfos run` —— 跑一个交互式运行
+### 4.0 `wfos` / `wfos chat` —— 交互式会话
+
+```bash
+wfos                                   # 不带参数 = 进入交互模式
+wfos chat                              # 等价写法
+wfos chat --once "帮我看看这个项目"     # 只跑一轮，不读 stdin
+```
+
+| | |
+|---|---|
+| 用途 | 多轮对话：直接说你想做什么，agent 自主读文件、改文件、跑构建与测试 |
+| 参数 | `--once <文本>`（只在这个子命令上；跑一轮就退出） |
+| 输出 | 每轮打印回复；有被策略拦下的写操作时提示用 `wfos pending` / `approve` |
+| 退出 | `exit` / `quit` / Ctrl+C / EOF |
+| 退出码 | `0` 正常结束；`1` 仅 `--once` 且那一轮失败时（会话本身仍可用） |
+
+**它是普通 run**：出现在 `wfos history`，`wfos trace show <id>` 能回看每一轮
+（`chat.user` / `tool.called` / `chat.assistant`）与每一次文件改动。
+
+**它不是状态机**：`kind=chat` 没有迁移，`wfos resume` 对它无效（会被安全地忽略）。
+
+**权限**：写/改项目内文件直接放行（与 `wfos mcp --role implementer` 一致），
+**删除仍需审批** —— 被拦下的删除会自动生成一条审批，`wfos approve` 后下一轮即可执行。
+
+### 4.1 `wfos run` —— 跑一个状态机流程
 
 ```bash
 wfos run "新增一个用户模块，改 app.py"
@@ -301,6 +325,7 @@ wfos rsi history regression --json
 | `wfos capabilities` | 已观测到的 provider 能力 | ✅ | 恒 `0` |
 | `wfos metrics [run_id] --limit` | token / 延迟 / 成本用量与覆盖率 | ✅ | `1` 找不到运行 |
 | `wfos wiki search\|list\|promote` | 三层知识库 | ❌ | `1`/`2` 见下 |
+| `wfos chat [--once]` | 交互式会话（同裸 `wfos`） | ❌ | `0`；`1` 仅 `--once` 失败时 |
 | `wfos mcp --role --run-id` | 以 MCP stdio 服务端运行 | ❌ | `2` role 不在 `EXTERNAL_ROLES` |
 
 > ⚠️ **`wfos wiki promote` 当前不可用**（真实缺陷，见 `docs/reference.md` §关键 Bug）：

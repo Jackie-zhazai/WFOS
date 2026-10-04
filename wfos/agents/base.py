@@ -112,6 +112,10 @@ class BaseAgent:
     max_rounds: int = 8
     failure_strategy = "report_failure"
     output_schema: type[BaseModel]
+    # What the turn opens with. A state-machine agent is told to finish a stage;
+    # the interactive one is told to answer a person. Overridable so `run()` stays
+    # one loop rather than two.
+    opening_prompt = "请依据上述上下文完成本阶段任务，并输出符合输出要求的 JSON 对象。"
 
     def __init__(self, llm: LLMAdapter, gateway: ToolGateway, project_root: str | Path = ".",
                  *, repeated_call_threshold: int | None = None,
@@ -252,6 +256,15 @@ class BaseAgent:
             sections["memory"] = (
                 "## 历史运行记忆（同一批文件上的既往运行，摘自 Harness 的运行记录）\n"
                 + render_memory(memory))
+        # Only the interactive entry produces this, so for every other run the key
+        # is absent and the assembled prompt is byte-for-byte what it was. Passing
+        # an empty string instead would insert a stray separator — see
+        # `context.fit`'s note — which is why the key is omitted rather than blank.
+        conversation = str(ctx.get("conversation") or "")
+        if conversation:
+            sections["conversation"] = (
+                "## 本次会话已有的往来（最早在前；最后一条是用户当前的请求）\n"
+                + conversation)
         changes = self._render_changes(ctx)
         if changes:
             sections["changes"] = changes
@@ -444,7 +457,7 @@ class BaseAgent:
         system = self.build_prompt(ctx, tools=tools)
         messages: list[dict] = [
             {"role": "system", "content": system},
-            {"role": "user", "content": "请依据上述上下文完成本阶段任务，并输出符合输出要求的 JSON 对象。"},
+            {"role": "user", "content": self.opening_prompt},
         ]
         # Consecutive identical tool calls: re-issuing the exact same (name,
         # arguments) pair yields no new information, so the repeat is answered

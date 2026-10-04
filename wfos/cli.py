@@ -102,7 +102,8 @@ def _json(payload) -> None:
 
 
 def _show_run(harness: Harness, run: dict) -> None:
-    kind_label = "功能开发" if run["kind"] == "feature" else "问题修复"
+    kind_label = {"feature": "功能开发", "bugfix": "问题修复"}.get(
+        run["kind"], "交互会话")
     _p(f"运行 {run['id']}  [{kind_label}] 状态={run['status']}")
     _p(f"  标题: {run['title']}")
     _p(f"  状态机当前状态: {run['state']}")
@@ -184,6 +185,79 @@ def cmd_run(harness: Harness, args) -> int:
         _p(f"> 已生成子回归流程 {child['id'] if child else '?'}。"
            f"子流程完成后用 `wfos resume-child <子ID>` 继续父流程。")
     return 0
+
+
+def cmd_chat(harness: Harness, args) -> int:
+    """An interactive session: one run, one turn at a time.
+
+    The only place in this file that reads stdin. Everything a turn actually does
+    lives in `Harness.converse`, which takes its text as an argument — so a test
+    drives the whole feature without a terminal, and this function is left with
+    nothing but reading lines and printing answers.
+
+    The session is a run, so it lands in `wfos history`, its turns are events, and
+    `wfos trace show` reconstructs the conversation afterwards. It is **not** a
+    state machine: `advance` refuses this kind outright.
+    """
+    once = getattr(args, "once", None)
+    repo = harness.repo
+    run = harness.create_run("（交互式会话）", kind="chat",
+                             title=(once or "交互式会话")[:60])
+    run_id = run["id"]
+
+    try:
+        if once:
+            outcome = asyncio.run(harness.converse(run_id, once))
+            _p(outcome["reply"])
+            _report_pending(outcome)
+            return 0 if outcome["ok"] else 1
+
+        _p(f"交互会话 {run_id}   项目 {harness.cfg.project_root}")
+        _p("直接说你想做什么；exit / quit / Ctrl+C 结束。")
+
+        async def session() -> None:
+            # One event loop for the whole session, not one per turn: the gateway
+            # caches its in-process MCP client per loop and rebuilds it whenever
+            # the loop changes.
+            while True:
+                try:
+                    line = input("wfos> ")
+                except (EOFError, OSError, KeyboardInterrupt):
+                    # OSError as well as EOFError: under a non-tty stdin (pytest's
+                    # capture object, a closed pipe) reading raises OSError, and
+                    # catching only EOFError turns a normal end-of-input into a
+                    # crash. KeyboardInterrupt is Ctrl+C — a way out, not a fault.
+                    _p("")
+                    return
+                text = (line or "").strip()
+                if not text:
+                    continue
+                if text in ("exit", "quit", ":q"):
+                    return
+                try:
+                    outcome = await harness.converse(run_id, text)
+                except RunLockedError as e:
+                    _p(f"（{e}）")
+                    continue
+                _p(outcome["reply"])
+                _report_pending(outcome)
+
+        asyncio.run(session())
+        return 0
+    finally:
+        # The session ends however it ends — `exit`, EOF, Ctrl+C, an exception.
+        # Closing the run here is what keeps it out of `waiting_approval`, which
+        # would send `wfos approve` down `advance` into a machine that has no chat.
+        if repo.get_run(run_id)["status"] not in ("completed", "failed", "cancelled"):
+            repo.set_status(run_id, "completed")
+        _p(f"会话结束（{run_id}）。`wfos trace show {run_id}` 可回看全过程。")
+
+
+def _report_pending(outcome: dict) -> None:
+    actions = outcome.get("pendingApprovals") or []
+    if actions:
+        _p("等待审批: " + "、".join(actions)
+           + "   —— 用 `wfos pending` 查看，`wfos approve <ID>` 放行后再说一次。")
 
 
 def cmd_status(harness: Harness, args) -> int:
@@ -754,7 +828,12 @@ def cmd_result(harness: Harness, args) -> int:
         _p("\n=== 越界写入请求（未落盘，待审批） ===")
         for v in violations:
             _p(f"  {v['tool']}:{v['path']}")
-    observed = harness.repo.affected_paths_for_run(args.run_id, agent="implementer")
+    # Both writers, not just the state machine's: an interactive session's
+    # edits are attributed to `assistant`, and filtering them out made
+    # `wfos result` report "no changes" for a session that had made some.
+    observed = sorted({p for role in ("implementer", "assistant")
+                       for p in harness.repo.affected_paths_for_run(
+                           args.run_id, agent=role)})
     deviation = (harness.repo.get_step(args.run_id, "implement") or {}) \
         .get("output_json", {}).get("plan_deviation") or {}
     if deviation and not deviation.get("unplanned") and (
@@ -1114,7 +1193,10 @@ def cmd_wiki(harness: Harness, args) -> int:
 # -------------------------------------------------------------------- argparse
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wfos", description="Model-agnostic engineering workflow")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    # Not `required`: with no subcommand this is an interactive session. That is
+    # the whole point of the entry point — `wfos` on its own should start a
+    # conversation, not print a usage error.
+    sub = parser.add_subparsers(dest="cmd", required=False)
 
     p = sub.add_parser("run", help="创建并推进一个运行")
     p.add_argument("text", nargs="+")
@@ -1122,6 +1204,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--title", default=None)
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("chat", help="交互式会话：多轮问答，可直接读写项目并跑测试")
+    # Only here, never on the root parser: a subparser's default overwrites the
+    # root's parsed value for the same dest, so defining it in both places makes
+    # a bare `wfos` inherit `chat`'s default.
+    p.add_argument("--once", default=None,
+                   help="只跑一轮就退出（不读 stdin），便于脚本化")
+    p.set_defaults(fn=cmd_chat)
 
     p = sub.add_parser("status", help="查看运行状态")
     p.add_argument("run_id", nargs="?", default=None)
@@ -1280,6 +1370,8 @@ def main(argv: list[str] | None = None) -> int:
             # and "another process holds the run" (3).
             _p(str(e))
             return 4
+        if args.cmd is None:            # bare `wfos` -> an interactive session
+            return cmd_chat(harness, args)
         return args.fn(harness, args)
     finally:
         _seal_json()

@@ -1,4 +1,4 @@
-"""Two persistent state machines (Feature dev, Bugfix diagnosis).
+"""The state machines: Feature dev, Bugfix diagnosis, and the chat session.
 
 The model may only *suggest* a next state; the Harness validates every
 transition against the machine and its preconditions before persisting it.
@@ -49,12 +49,29 @@ BUGFIX_TRANSITIONS = {
 # Sentinel pseudo-state used to signal the Harness to spawn a child Bugfix run.
 SPAWN_BUGFIX = "spawn_bugfix"
 
+# The interactive entry. It is a machine with one state and no transitions, and
+# that is the whole of it — but it is a *machine* rather than a special case
+# because `Repo.create_run` reads its initial state here for every run, and a kind
+# this table does not know is a `KeyError` at the one place every run is born.
+#
+# Having no transitions is not a limitation to work around: `advance` is guarded
+# against this kind (see `ADVANCEABLE_KINDS` in the orchestrator), so nothing ever
+# asks it where to go next.
+CHAT_STATES = ["chat"]
+
 MACHINES = {
     "feature": {"states": set(FEATURE_STATES), "transitions": FEATURE_TRANSITIONS,
                 "initial": "req_capture", "completed": "completed"},
     "bugfix":  {"states": set(BUGFIX_STATES), "transitions": BUGFIX_TRANSITIONS,
                 "initial": "issue_capture", "completed": "completed"},
+    "chat":    {"states": set(CHAT_STATES), "transitions": {},
+                "initial": "chat", "completed": "chat"},
 }
+
+# The kinds `advance` may drive. A `chat` run is stepped one turn at a time by
+# `Harness.converse` instead, and letting `advance` reach it would look for a
+# `STATE_AGENT["chat"]` that does not exist.
+ADVANCEABLE_KINDS = ("feature", "bugfix")
 
 
 def is_terminal(state: str) -> bool:

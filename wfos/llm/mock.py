@@ -476,3 +476,60 @@ class MockAdapter(LLMAdapter):
             }],
             "next_step": {"suggested_state": "completed", "reason": "知识沉淀完成"},
         }
+
+    # ------------------------------------------------------------- chat turn
+    async def _h_assistant__chat(self, ctx) -> dict:
+        """A deterministic stand-in for one interactive turn.
+
+        It goes through `ctx["gateway"]` like every other handler, so the offline
+        path exercises the same policy, the same snapshot attribution and the same
+        trace as a real model would — the only thing it fakes is the decision of
+        what to look at. Without this, `WFOS_PROVIDER=mock` (the default, and what
+        every test runs under) would fall through to the stub output, fail the
+        `ChatOutput` schema, and burn all twelve rounds before erroring.
+        """
+        gw = ctx.get("gateway")
+        listing = await gw.call(tool="workspace.list_files", args={"pattern": "*"})
+        names = []
+        if listing.ok and isinstance(listing.structured, dict):
+            names = [str(p) for p in (listing.structured.get("files") or [])]
+
+        asked = self._last_user_message(ctx)
+        # If the request names a file we can see, actually open it — that is the
+        # behaviour the acceptance criteria describe ("帮我看看这个项目").
+        opened = ""
+        target = ""
+        for name in names:
+            if name and name in asked:
+                got = await gw.call(tool="workspace.read", args={"path": name})
+                if got.ok and isinstance(got.structured, dict):
+                    target = name
+                    body = str(got.structured.get("content") or "")
+                    opened = f"\n\n{name} 的前几行：\n{body[:200]}"
+                break
+
+        # A request that asks for a change, naming a file, gets one — so the offline
+        # path exercises the write policy and the snapshot attribution too, not just
+        # the read path. Keyword-driven on purpose: this is a scripted brain, and
+        # the only thing it is allowed to be is predictable.
+        if target and any(verb in asked for verb in ("改", "添加", "新增", "加", "写")):
+            body = str(got.structured.get("content") or "")
+            marker = "\n\n# 由交互会话追加（mock）\n"
+            wrote = await gw.call(tool="workspace.write",
+                                  args={"path": target, "content": body + marker})
+            if wrote.ok:
+                opened += f"\n\n（已修改 {target}）"
+            else:
+                opened += f"\n\n（改 {target} 被拒：{wrote.error}）"
+
+        return {"reply": (f"项目里有 {len(names)} 个文件："
+                          + "、".join(names[:8])
+                          + ("…" if len(names) > 8 else "")
+                          + opened)}
+
+    @staticmethod
+    def _last_user_message(ctx) -> str:
+        for line in reversed(str(ctx.get("conversation") or "").splitlines()):
+            if line.startswith("[用户]"):
+                return line[len("[用户]"):].strip()
+        return ""

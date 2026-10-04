@@ -88,9 +88,19 @@ class WfosMcpServer:
     # ------------------------------------------------------------- tool specs
     def _build_specs(self) -> dict[str, ToolSpec]:
         root = [str(self._config.project_root.resolve())]
-        ALL = ["investigator", "architect", "implementer", "verifier", "curator", "harness"]
+        # `assistant` is the interactive entry's role. It is listed here beside the
+        # state-machine roles rather than given a private path through the policy:
+        # the gateway is the one place a tool call is allowed or refused, and a
+        # second entry point that answered the same question would be a second
+        # answer. It is absent from `EXTERNAL_ROLES`, so `wfos mcp --role assistant`
+        # is still refused — an outside client does not get the union below.
+        ALL = ["investigator", "architect", "implementer", "verifier", "curator",
+               "assistant", "harness"]
         READ = ALL
-        WRITERS = ["implementer"]
+        # The union that no state-machine role has: read, write, *and* run the
+        # build/tests. See `models.Role` for why it is not handed to one of them.
+        WRITERS = ["implementer", "assistant"]
+        BUILDERS = ["verifier", "assistant"]
         s = {}
         s["workspace.list_files"] = ToolSpec(
             "workspace.list_files", "按 glob 列出项目内文件（只读）",
@@ -147,19 +157,19 @@ class WfosMcpServer:
         s["build.check"] = ToolSpec(
             "build.check", "进程内语法构建检查：对列出的 .py 文件执行 compile()",
             {"type": "object", "properties": {"files": {"type": "array", "items": {"type": "string"}}}},
-            allowed_roles=["verifier"], path_roots=root, read_only=True, timeout=30,
+            allowed_roles=BUILDERS, path_roots=root, read_only=True, timeout=30,
             max_output=100_000, side_effects=False)
         s["build.run"] = ToolSpec(
             "build.run", "运行白名单内的构建命令（有副作用：产生构建产物）",
             {"type": "object", "properties": {"command": {"type": "string", "minLength": 1}},
              "required": ["command"]},
-            allowed_roles=["verifier"], path_roots=root, read_only=False, timeout=120,
+            allowed_roles=BUILDERS, path_roots=root, read_only=False, timeout=120,
             max_output=200_000, side_effects=True)
         s["test.run"] = ToolSpec(
             "test.run", "运行白名单内的测试命令并解析 PASS/FAIL（有副作用）",
             {"type": "object", "properties": {"command": {"type": "string", "minLength": 1}},
              "required": ["command"]},
-            allowed_roles=["verifier"], path_roots=root, read_only=False, timeout=120,
+            allowed_roles=BUILDERS, path_roots=root, read_only=False, timeout=120,
             max_output=200_000, side_effects=True)
         s["logs.read"] = ToolSpec(
             "logs.read", "读取日志文件，可按关键字过滤或取尾部（只读）",

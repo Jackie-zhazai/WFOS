@@ -18,8 +18,15 @@ SECTION_SEP = "\n\n"
 
 # Fixed assembly order: stable, load-bearing sections first, and the sections a
 # reader scans for last. Deterministic ordering is what makes a prompt diffable.
-SECTION_ORDER = ("rules", "run_context", "working_set", "skills", "memory", "plan",
-                 "prior_plan", "evidence", "changes", "tools", "output_schema")
+#
+# `conversation` sits right after `working_set` because it plays the same role for
+# an interactive turn that `working_set` plays for a state: it says what this
+# exchange is about. Only the chat entry produces it, so for every other run the
+# section is absent and the assembled prompt is byte-for-byte what it was —
+# which is why adding it here does not move the frozen baseline.
+SECTION_ORDER = ("rules", "run_context", "working_set", "conversation", "skills",
+                 "memory", "plan", "prior_plan", "evidence", "changes", "tools",
+                 "output_schema")
 
 # Sections that may be shrunk, cheapest-to-lose first. Anything not listed here
 # is never clipped, no matter how large it grows — `working_set` included: it
@@ -28,16 +35,24 @@ SECTION_ORDER = ("rules", "run_context", "working_set", "skills", "memory", "pla
 # plan is what this state is executing, so memory goes first when something must.
 # `skills` goes first: a procedure is a suggestion about how to get past a
 # failure, and the plan is what this state is actually executing.
-REDUCTION_ORDER = ("skills", "evidence", "memory", "prior_plan", "plan", "changes")
+# `conversation` goes last, which makes it the *last* thing cut. It is reducible —
+# a long session has to lose something — but what it holds is what the user
+# actually asked for, so everything else goes before it.
+REDUCTION_ORDER = ("skills", "evidence", "memory", "prior_plan", "plan", "changes",
+                   "conversation")
 
 # Default ceilings, in characters, for the reducible sections. Measured floors:
 # the rules + tool schemas + output schema of a real agent run to ~3000-4600
 # chars on their own, so the total budget has to clear that comfortably.
 DEFAULT_TOTAL_BUDGET = 30_000
 DEFAULT_SECTION_BUDGETS = {"evidence": 8_000, "memory": 3_000, "skills": 3_000,
-                           "prior_plan": 4_000, "plan": 4_000, "changes": 3_000}
+                           "prior_plan": 4_000, "plan": 4_000, "changes": 3_000,
+                           "conversation": 8_000}
+# The conversation floor is one turn's worth: a prompt that has lost the question
+# it was asked is not a cheaper prompt, it is a different task.
 DEFAULT_SECTION_FLOORS = {"evidence": 1_000, "memory": 300, "skills": 300,
-                          "prior_plan": 400, "plan": 400, "changes": 200}
+                          "prior_plan": 400, "plan": 400, "changes": 200,
+                          "conversation": 600}
 
 # Cap on a single tool result fed back into the conversation. The tool specs
 # allow up to 200k chars for a test run; a handful of those would crowd out
@@ -70,6 +85,12 @@ def fit(sections: dict[str, str], *, total_budget: int = DEFAULT_TOTAL_BUDGET,
     says which sections were cut and by how much, so a shrinking prompt is
     visible rather than silent. `over_budget` is reported honestly — if the
     non-reducible sections alone exceed the budget there is nothing left to cut.
+
+    A caller that has nothing to say in a section must **omit the key**, not pass
+    `""`: an empty section still contributes its separator, so `fit({"a": "x",
+    "b": ""})` is `"x\\n\\n"` while `fit({"a": "x"})` is `"x"`. Measured, not
+    assumed — it is the difference between a prompt that is unchanged for the
+    runs that do not use the section and one that quietly gains a blank line.
     """
     raw = {name: (text or "") for name, text in sections.items()}
     limits: dict[str, int | None] = {name: (budgets or DEFAULT_SECTION_BUDGETS).get(name)

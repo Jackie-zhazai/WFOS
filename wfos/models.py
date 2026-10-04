@@ -9,8 +9,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-Role = Literal["investigator", "architect", "implementer", "verifier", "curator", "harness"]
-RunKind = Literal["feature", "bugfix"]
+# `assistant` is the interactive entry's role. It exists so the policy layer can
+# name a principal that may read, write *and* run the build/tests — the union no
+# single state-machine role has, and one that would be wrong to give any of them:
+# an implementer that could run its own tests is not the same separation as an
+# independent verifier. It is deliberately **not** in `AGENT_CLASSES`.
+Role = Literal["investigator", "architect", "implementer", "verifier", "curator",
+               "assistant", "harness"]
+RunKind = Literal["feature", "bugfix", "chat"]
 RunStatus = Literal[
     "created", "running", "waiting_approval", "waiting_child", "paused",
     "completed", "failed", "cancelled",
@@ -181,6 +187,16 @@ class ImplementerOutput(BaseModel):
     changes: list[Change] = Field(default_factory=list)
     failed: list[str] = Field(default_factory=list)
     next_step: NextStep
+
+
+class ChatOutput(BaseModel):
+    """One turn's answer, after whatever tool calls it needed.
+
+    There is no `next_step`: a state-machine agent suggests where the workflow
+    goes, and a conversation does not have one. The reply is the whole product —
+    the tools it ran on the way are in the trace, not in this object.
+    """
+    reply: str
 
 
 class BuildResult(BaseModel):

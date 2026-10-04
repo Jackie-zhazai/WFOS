@@ -26,6 +26,10 @@ from typing import Any
 
 from .harness import statemachine as sm
 
+# The workflows a *task* may declare. Not `sm.MACHINES`: that table also carries
+# the interactive kind, which has no state machine to drive.
+TASK_WORKFLOWS = sm.ADVANCEABLE_KINDS
+
 SCHEMA_VERSION = 1
 # The three-tier suite directory. One default for both the task layer and the
 # reliability baseline, so "all the tasks" cannot mean two different sets.
@@ -102,10 +106,15 @@ class TaskSpec:
             raise ValueError(f"task {task_id} 的 version 必须是正整数，实际 {version!r}")
 
         workflow = str(_one_of(case, "workflow", "kind") or "")
-        if workflow not in sm.MACHINES:
+        # A task drives the workflow state machine, so only the kinds that *have*
+        # one are legal here. This used to read `sm.MACHINES`, which meant adding a
+        # machine to the harness silently widened what a task file could declare —
+        # `workflow: "chat"` would have been accepted and then driven into a
+        # machine `advance` refuses. The task layer gets its own closed list.
+        if workflow not in TASK_WORKFLOWS:
             raise ValueError(
                 f"task {task_id} 的 workflow 未知：{workflow!r}；"
-                f"可选 {', '.join(sorted(sm.MACHINES))}")
+                f"可选 {', '.join(sorted(TASK_WORKFLOWS))}")
 
         text = str(_one_of(case, "input", "request") or "").strip()
         if not text:

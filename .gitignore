@@ -14,6 +14,10 @@ env/
 .pytest_cache/
 .ruff_cache/
 
+# ── 本地 agent 目录：不属于交付内容 ──────────────────────────────────────
+# `.claude/` 里是本地会话状态与变更记录，开发者自己留着，不进仓库。
+.claude/
+
 # ── 凭据：绝不入库 ────────────────────────────────────────────────────────
 # 这个仓库从不存放凭据。provider 的 key 只从环境变量读（见 wfos/llm/factory.py
 # 的 PROVIDER_KEY_ENV 与 wfos/config.py），不入库、不落盘、不写进任何 artifact。

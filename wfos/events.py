@@ -51,6 +51,13 @@ BUDGET_EXCEEDED = "budget.exceeded"
 REUSE_REFUSED = "reuse.refused"
 DELEGATED = "delegated"
 TOOL_CALLED = "tool.called"
+# The interactive entry. A conversation turn is not a state transition, and
+# naming it separately keeps the two readable apart: what the person asked and
+# what the assistant answered are facts about a chat run that no
+# `step.completed` records. They live here rather than in a `runs.payload`
+# column because events are redacted on the way in and cannot be rewritten.
+CHAT_USER = "chat.user"
+CHAT_ASSISTANT = "chat.assistant"
 EVALUATED = "evaluated"
 # RSI. A candidate's status move is a fact about a decision, and it belongs in the
 # same ordered history as everything else the harness did.
@@ -60,7 +67,8 @@ CANDIDATE_STATUS = "rsi.candidate.status"
 TYPES = (RUN_CREATED, RUN_STATUS, RUN_RESUMED, TASK_LOADED, STEP_COMPLETED,
          STEP_FAILED, STEP_INVALIDATED, TRANSITION, APPROVAL_REQUESTED,
          APPROVAL_DECIDED, BUDGET_EXCEEDED, REUSE_REFUSED, DELEGATED,
-         TOOL_CALLED, EVALUATED, CANDIDATE_PROPOSED, CANDIDATE_STATUS)
+         TOOL_CALLED, CHAT_USER, CHAT_ASSISTANT, EVALUATED, CANDIDATE_PROPOSED,
+         CANDIDATE_STATUS)
 
 # Types whose payload the harness produces itself and whose absence of a payload
 # would still be meaningful. Not enforced — listed so the set is visible.

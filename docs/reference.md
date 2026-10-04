@@ -580,7 +580,7 @@ WFOS 做的是第二个问题。
 ### ⑩ 最终验证结果
 
 ```
-pytest -q                    711 passed, 1 skipped
+pytest -q                    729 passed, 1 skipped
 ruff check .                 All checks passed
 artifacts/accept_final.py    86 项检查全部通过（端到端真跑）
 artifacts/mutate_p6.py       9/9 变异被抓住

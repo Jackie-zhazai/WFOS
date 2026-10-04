@@ -44,15 +44,50 @@ wfos --help
 
 ```bash
 export WFOS_PROVIDER=mock        # Windows: set WFOS_PROVIDER=mock
-wfos run "新增一个模块，改 app.py"
+wfos                             # 交互式会话：直接说你想做什么
+wfos chat --once "帮我看看这个项目"   # 只跑一轮，便于脚本化
+wfos run "新增一个模块，改 app.py"    # 或者跑一遍完整状态机
 wfos status --json
 wfos history --json
 wfos trace show <run_id>         # append-only 轨迹，含已被删除的步骤
 wfos result <run_id>             # 当前工作状态（和 trace 不是一回事）
 ```
 
-`wfos run` 会推进状态机直到终态、审批门或子流程等待。要跑一个**声明式任务**、
-在自己的工作区里：
+`wfos`（不带参数）进入**交互模式**：直接说想做什么，agent 会自己读文件、改文件、
+跑构建与测试，每轮都在同一个 run 里，`wfos trace show` 能回看全部往来。写/改项目内的
+文件直接生效，**删除需要审批**（`wfos pending` / `wfos approve`）。
+
+## 交互式会话
+
+`wfos`（不带参数）或 `wfos chat` 进入交互模式：
+
+```bash
+wfos                                    # 直接说你想做什么
+wfos chat --once "帮我看看这个项目"      # 只跑一轮，不读 stdin，便于脚本化
+```
+
+agent 会自己决定调哪些工具 —— 读文件、grep、看 git 状态、改文件、跑构建与测试，
+然后回答你。实测一次真实会话：
+
+```
+> 给 app.py 里的 compute 加上类型标注和 docstring
+… workspace.list_files → git.status → workspace.read ×2 → workspace.search
+  → wiki.search → workspace.patch → workspace.read → build.check → test.run
+「已完成 app.py 中 compute 的类型标注与 docstring 补充。既有断言未回归。」
+```
+
+**它是普通 run。** 一次会话是一个 run：出现在 `wfos history`，`wfos trace show <id>`
+能回看到每一轮（`chat.user` / `tool.called` / `chat.assistant` 三类事件，actor 分别是
+`human` / `model`）与每一次文件改动（`wfos result` 显示归因）。
+
+**权限沿用现有策略。** 改/写项目内的文件直接生效（和 `wfos mcp --role implementer` 一致），
+**删除需要审批** —— 被拦下的删除会自动生成一条 `<tool>:<path>` 的待审批项，`wfos approve`
+之后下一轮即可执行。
+
+`wfos run "…"` 则是另一条路：它按关键词在 feature / bugfix 之间路由，走完整状态机
+（11 个状态）—— 认不出关键词时会报错，此时用 `--kind feature` 或 `--kind bugfix` 指定。
+
+要跑一个**声明式任务**、在自己的工作区里：
 
 ```bash
 wfos task run benchmark/smoke feature-happy-path --workspace .data/tasks
@@ -193,9 +228,17 @@ Python 3.12，三步 —— 安装、`ruff check .`、`pytest -q`。没有矩阵
 - **候选库和正式 skill 库是同一个 SQLite 文件**：隔离由代码路径保证，不是存储隔离。
 - **没有真正的 LLM Judge**，judge 目前是可选且非 LLM 的。
 
+交互式会话相关的：
+
+- **会话不是状态机。** `kind=chat` 只有一个状态、没有迁移，`wfos resume` 对它无效
+  （会被安全地忽略），`wfos evaluate` 也不适用。
+- **会话之间不共享上下文。** 每次 `wfos` 是一个新 run，多轮对话只在这一次会话内。
+- **`WFOS_PROVIDER=mock` 下的对话是脚本化的**：它会真的调工具（列文件、按关键词读/写），
+  但不是模型在决定。要真实能力得接真实 provider。
+- **流式输出、slash 命令、会话切换、文件附件都没有** —— 这是刻意不做，不是未完成。
+
 ## 文档
 
 - [`docs/architecture.md`](docs/architecture.md) —— 文件架构 / 分层 / 对象关系 / 设计思想 / 执行链路 / 架构图
 - [`docs/operations.md`](docs/operations.md) —— CLI 教程 / 从零运行 / 测试体系 / 安全边界
 - [`docs/reference.md`](docs/reference.md) —— 数据库结构 / 关键缺陷 / 技术亮点 / 当前限制 / 答辩讲解
-- [`.claude/history.md`](.claude/history.md) —— 每阶段做了什么、修了哪些真 bug
