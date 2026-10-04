@@ -37,8 +37,27 @@ wfos --help
 （`WFOS_PROVIDER` + 该 Provider 的 API key 环境变量，见
 [`docs/operations.md`](docs/operations.md) §1）。仓库不存放任何凭据。
 
-要求 Python ≥ 3.10。仓库根目录要作为工作目录 —— `benchmark/` 与 `experiments/`
-是相对路径（见文末限制）。
+要求 Python ≥ 3.10。
+
+## 三种用法
+
+| 你要什么 | 命令 |
+|---|---|
+| **对话**，它自己读文件/改文件/跑测试 | `wfos`（或 `wfos chat`；`--once "…"` 只跑一轮） |
+| **开发一个新功能**，走完整流程 | `wfos run "新增一个求和函数，加到 app.py"` |
+| **查一个问题**，走诊断流程 | `wfos run "cart.py 的 total 算出来比预期少" --kind bugfix` |
+
+三条通用规则：
+
+- **关键词只是选流程用的。** 认不出"新增/报错"这类词时加 `--kind feature|bugfix`，
+  别去凑关键词 —— 关键词不是"能不能运行"的开关。
+- **`wfos chat` 在哪个目录都能跑**；`benchmark` 与 `experiments` 是仓库相对路径，
+  那几条命令必须在仓库根执行（见文末限制）。
+- **改文件直接生效，删除要审批。** 被拦下的删除会自动生成待审批项：`wfos pending` 看，
+  `wfos approve <ID>` 放行后再说一次即可。
+
+出问题看这三条：`wfos status <run_id>`（失败时会说明终止原因）·
+`wfos trace show <run_id>`（完整轨迹）· `wfos result <run_id>`（改了哪些文件）。
 
 ## 最小运行
 
@@ -192,8 +211,12 @@ $ wfos status no-such-run --json ; echo "exit=$?"
 exit=1
 ```
 
-退出码：`0` 成功 · `1` 没找到 / 判定不通过 · `2` 参数错误 · `3` 运行被别的进程持有 ·
-`4` 缺少凭据。
+退出码：`0` 成功 · `1` 没找到 / 判定不通过 / **`wfos run` 的运行以 failed 结束** ·
+`2` 参数错误 · `3` 运行被别的进程持有 · `4` 缺少凭据。
+
+`wfos run` 失败时会说明是**哪一种**失败，因为处置完全不同：`流程判定终止:` 是工作流
+自己的结论（没有东西需要修），`执行出错:` 是 Harness 放弃了（这是缺陷），
+`迁移被拒:` 是某个状态建议了它的机器不允许的迁移。
 
 ## 测试
 
