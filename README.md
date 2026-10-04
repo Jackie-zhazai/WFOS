@@ -236,9 +236,3 @@ Python 3.12，三步 —— 安装、`ruff check .`、`pytest -q`。没有矩阵
 - **`WFOS_PROVIDER=mock` 下的对话是脚本化的**：它会真的调工具（列文件、按关键词读/写），
   但不是模型在决定。要真实能力得接真实 provider。
 - **流式输出、slash 命令、会话切换、文件附件都没有** —— 这是刻意不做，不是未完成。
-
-## 文档
-
-- [`docs/architecture.md`](docs/architecture.md) —— 文件架构 / 分层 / 对象关系 / 设计思想 / 执行链路 / 架构图
-- [`docs/operations.md`](docs/operations.md) —— CLI 教程 / 从零运行 / 测试体系 / 安全边界
-- [`docs/reference.md`](docs/reference.md) —— 数据库结构 / 关键缺陷 / 技术亮点 / 当前限制 / 答辩讲解
