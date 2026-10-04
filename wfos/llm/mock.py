@@ -489,7 +489,19 @@ class MockAdapter(LLMAdapter):
         `ChatOutput` schema, and burn all twelve rounds before erroring.
         """
         gw = ctx.get("gateway")
-        listing = await gw.call(tool="workspace.list_files", args={"pattern": "*"})
+
+        async def call(tool: str, args: dict):
+            """Go through the gateway, and tell a watching caller like the real
+            loop does. This brain makes its tool calls inside one `complete()`
+            instead of returning `tool_calls`, so without this the offline path
+            would be the only one that shows no progress."""
+            out = await gw.call(tool=tool, args=args)
+            observer = ctx.get("on_tool")
+            if callable(observer):
+                observer(tool, args, out.structured or {"ok": out.ok})
+            return out
+
+        listing = await call("workspace.list_files", {"pattern": "*"})
         names = []
         if listing.ok and isinstance(listing.structured, dict):
             names = [str(p) for p in (listing.structured.get("files") or [])]
@@ -501,7 +513,7 @@ class MockAdapter(LLMAdapter):
         target = ""
         for name in names:
             if name and name in asked:
-                got = await gw.call(tool="workspace.read", args={"path": name})
+                got = await call("workspace.read", {"path": name})
                 if got.ok and isinstance(got.structured, dict):
                     target = name
                     body = str(got.structured.get("content") or "")
@@ -515,8 +527,8 @@ class MockAdapter(LLMAdapter):
         if target and any(verb in asked for verb in ("改", "添加", "新增", "加", "写")):
             body = str(got.structured.get("content") or "")
             marker = "\n\n# 由交互会话追加（mock）\n"
-            wrote = await gw.call(tool="workspace.write",
-                                  args={"path": target, "content": body + marker})
+            wrote = await call("workspace.write",
+                               {"path": target, "content": body + marker})
             if wrote.ok:
                 opened += f"\n\n（已修改 {target}）"
             else:

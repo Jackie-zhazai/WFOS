@@ -314,8 +314,11 @@ def test_the_bare_command_starts_a_session_and_ends_on_exit(app, tmp_path):
     proc = _run_cli([], env, input="帮我看看这个项目\nexit\n", timeout=180)
 
     assert proc.returncode == 0, proc.stderr
-    assert "交互会话" in proc.stdout
-    assert "会话结束" in proc.stdout
+    # The banner and the sign-off are for the person at the terminal, not for
+    # whatever is reading stdout: they go to stderr, and the answer owns stdout.
+    assert "交互会话" in proc.stderr and "会话结束" in proc.stderr
+    assert "会话结束" not in proc.stdout
+    assert proc.stdout.strip(), "stdout 应该是这一轮的回答"
 
 
 def test_once_runs_a_single_turn_without_reading_stdin(app, tmp_path):
@@ -325,7 +328,11 @@ def test_once_runs_a_single_turn_without_reading_stdin(app, tmp_path):
     proc = _run_cli(["chat", "--once", "帮我看看这个项目"], env, timeout=180)
 
     assert proc.returncode == 0, proc.stderr
-    assert "会话结束" in proc.stdout
+    # `--once` says nothing about the session at all: its stdout is the answer and
+    # nothing else, so it can be redirected to a file or piped into something.
+    assert "会话结束" not in proc.stdout
+    assert "会话结束" not in proc.stderr
+    assert proc.stdout.strip()
     # And the run it left behind is an ordinary chat run in the ordinary store.
     repo = Repo(Path(env["WFOS_DATA"]) / "wfos.db")
     run = repo.list_runs(limit=1)[0]
@@ -368,3 +375,148 @@ def h_has_chat_agent(app) -> bool:
     assert set(h.agents) == {"investigator", "architect", "implementer",
                              "verifier", "curator"}
     return True
+
+
+# --------------------------------------------------- 预算用尽时仍要给出回答
+def test_a_turn_that_runs_out_of_rounds_still_answers(app):
+    """Observed on a real project before this: twelve rounds, twenty-four tool
+    calls, no answer, and the turn ended in an error.
+
+    Nothing stops a model that keeps finding one more thing to look at, so the
+    last round is spent with no tools offered. Whatever it says then is the
+    answer — marked, because a turn cut off mid-investigation is not the same
+    thing as one that finished.
+    """
+    from wfos.agents.chat import ChatAgent
+
+    script = [{"tool_call": {"name": "workspace.read",
+                             "arguments": {"path": f"f{i}.py"}}}
+              for i in range(ChatAgent.max_rounds - 1)]
+    script.append("我看完了：这个项目只有一个 compute 函数。")
+    h, _ = _harness(app, script)
+    run = _session(h)
+
+    out = _turn(h, run["id"], "帮我看看这个项目")
+
+    assert out["ok"] is True, "预算用尽不该是一次失败的会话轮次"
+    assert "compute" in out["reply"]
+    assert "不完整" in out["reply"], "必须标明这是在预算用尽前得到的"
+    step = app["repo"].get_step(run["id"], "chat")
+    assert step["status"] == "done"
+
+
+def test_a_turn_that_runs_out_with_nothing_to_say_still_says_something(app):
+    from wfos.agents.chat import ChatAgent
+
+    script = [{"tool_call": {"name": "workspace.read",
+                             "arguments": {"path": f"g{i}.py"}}}
+              for i in range(ChatAgent.max_rounds)]
+    h, _ = _harness(app, script)
+    run = _session(h)
+
+    out = _turn(h, run["id"], "看看")
+
+    assert out["ok"] is True
+    assert "预算" in out["reply"], "至少要说清楚为什么没有结论"
+
+
+def test_the_last_round_is_offered_no_tools(app):
+    """The forcing function itself, observed rather than assumed."""
+    from wfos.agents.chat import ChatAgent
+
+    offered: list[bool] = []
+
+    class _Watching(ScriptedAdapter):
+        async def complete(self, **kw):
+            offered.append(kw.get("tools") is not None)
+            return await super().complete(**kw)
+
+    h, _ = _harness(app, [])
+    h.chat_agent.llm = _Watching()
+    h.chat_agent.llm.set_script(
+        [{"tool_call": {"name": "workspace.read", "arguments": {"path": f"h{i}.py"}}}
+         for i in range(ChatAgent.max_rounds - 1)] + ["够了。"])
+    run = _session(h)
+
+    _turn(h, run["id"], "看看")
+
+    assert len(offered) == ChatAgent.max_rounds
+    assert all(offered[:-1]), "前面每一轮都该有工具"
+    assert offered[-1] is False, "最后一轮必须收走工具，逼它作答"
+
+
+def test_the_state_machine_agents_still_fail_when_they_run_out(app):
+    """The forcing function is chat-only, and that is deliberate.
+
+    A state that cannot finish must fail: forcing an answer out of an implementer
+    would let it describe changes it never made. The five roles therefore keep the
+    old behaviour, and this asserts the boundary rather than trusting it.
+    """
+    from wfos.agents.base import BaseAgent
+    from wfos.harness.orchestrator import AGENT_CLASSES
+
+    assert BaseAgent.answers_without_tools is False
+    h, _ = _harness(app, [])
+    assert all(not a.answers_without_tools for a in h.agents.values()), sorted(
+        r for r, a in h.agents.items() if a.answers_without_tools)
+    assert h.chat_agent.answers_without_tools is True
+    assert set(AGENT_CLASSES) == {"investigator", "architect", "implementer",
+                                  "verifier", "curator"}
+
+
+def test_the_chat_budget_is_stated_up_front(app):
+    """A model that does not know it is on a clock cannot budget its looking."""
+    from wfos.agents.chat import ChatAgent
+
+    h, _ = _harness(app, [])
+    prompt = h.chat_agent.opening_prompt
+
+    assert str(ChatAgent.max_rounds) in prompt
+    assert "最后一轮" in prompt
+
+
+# ------------------------------------------------------------ 过程可见（pico 那点）
+def test_the_caller_can_watch_the_turn_happen(app):
+    """The tool loop reports each call as it runs, for a CLI that wants to show it.
+
+    Scripted rather than mock on purpose: the mock brain calls the gateway itself
+    inside one `complete()`, so it never passes through the loop this hooks. Only
+    a model that returns tool calls does — which is what a real provider is.
+    """
+    h, _ = _harness(app, [
+        {"tool_call": {"name": "workspace.read", "arguments": {"path": "app.py"}}},
+        {"tool_call": {"name": "workspace.list_files", "arguments": {"pattern": "*"}}},
+        REPLY])
+    seen: list[tuple[str, str, bool]] = []
+    run = _session(h)
+
+    asyncio.run(h.converse(run["id"], "看看", on_tool=lambda n, a, p: seen.append(
+        (n, str(a.get("path") or a.get("pattern") or ""), bool(p.get("ok", True))))))
+
+    assert [name for name, _, _ in seen] == ["workspace.read", "workspace.list_files"]
+    assert seen[0][1] == "app.py"
+    assert all(ok for _, _, ok in seen)
+
+
+def test_the_callback_is_not_written_into_the_step_record(app):
+    """It is a live object, not a fact about the run — `gateway` is excluded for
+    the same reason, and a step that cannot be serialized cannot be written."""
+    h, _ = _harness(app, [REPLY])
+    repo = app["repo"]
+    run = _session(h)
+
+    asyncio.run(h.converse(run["id"], "在吗", on_tool=lambda *_: None))
+
+    step = repo.get_step(run["id"], "chat")
+    assert "on_tool" not in (step.get("input_json") or {})
+    assert "gateway" not in (step.get("input_json") or {})
+
+
+def test_a_harness_run_is_never_handed_a_callback(app):
+    """Off by default: progress belongs in a run's trace, not on someone's stdout."""
+    h, _ = _harness(app, [REPLY])
+    run = _session(h)
+
+    out = _turn(h, run["id"], "在吗")
+
+    assert out["ok"] is True   # no callback, no crash

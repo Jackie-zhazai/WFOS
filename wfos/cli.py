@@ -101,10 +101,45 @@ def _json(payload) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
+def _failure_reason(harness: Harness, run: dict) -> str:
+    """Why a run stopped, in whichever voice actually has the answer.
+
+    Two unrelated things end a run as `failed`, and they are treated completely
+    differently by whoever reads the output:
+
+      * **the workflow's own verdict** — the model looked, and concluded the
+        problem cannot be located or that stopping beats guessing. There is
+        nothing to fix; the run did its job.
+      * **the harness giving up** — an exception escaped a state, or a state
+        suggested a transition its machine does not allow. That one is a defect
+        somewhere and wants attention.
+
+    Printing both as `状态=failed` makes a considered conclusion read like a
+    crash, so the two are named apart. The verdict is read from the step the
+    model produced (`next_step.reason`), because the transition row only ever
+    carries the machine's own "合法转换" — the judgement never reaches it.
+    """
+    if run.get("error"):
+        return f"执行出错: {run['error']}"
+
+    steps = harness.repo.steps_for_run(run["id"])
+    judged = ((steps[-1].get("output_json") or {}).get("next_step") or {}) if steps else {}
+    if judged.get("suggested_state") == "failed" and judged.get("reason"):
+        return f"流程判定终止: {judged['reason']}"
+
+    for transition in reversed(harness.repo.transitions(run["id"])):
+        if transition["to_state"] == "failed" and transition.get("reason"):
+            return f"迁移被拒: {transition['reason']}"
+    return "（无终止原因 —— 运行以 failed 结束，但记录里没有说明）"
+
+
 def _show_run(harness: Harness, run: dict) -> None:
     kind_label = {"feature": "功能开发", "bugfix": "问题修复"}.get(
         run["kind"], "交互会话")
     _p(f"运行 {run['id']}  [{kind_label}] 状态={run['status']}")
+    if run["status"] == "failed":
+        _p(f"  终止原因: {_failure_reason(harness, run)}")
+        _p(f"  完整推理: wfos trace show {run['id']}")
     _p(f"  标题: {run['title']}")
     _p(f"  状态机当前状态: {run['state']}")
     if run.get("error"):
@@ -174,7 +209,7 @@ def cmd_run(harness: Harness, args) -> int:
     if args.json:
         run = _advance(harness, run["id"])
         _json({"run": run, "pendingApprovals": harness.repo.pending_approvals_for_run(run["id"])})
-        return 0
+        return 1 if run["status"] == "failed" else 0
     _p(f"已创建 {run['kind']} 运行 {run['id']}")
     run = _advance(harness, run["id"])
     _show_run(harness, run)
@@ -184,6 +219,13 @@ def cmd_run(harness: Harness, args) -> int:
         child = harness.repo.get_run(run["payload"].get("child_run_id") or "")
         _p(f"> 已生成子回归流程 {child['id'] if child else '?'}。"
            f"子流程完成后用 `wfos resume-child <子ID>` 继续父流程。")
+    # A run that ended `failed` exits non-zero. That was not the behaviour before
+    # — it returned 0 whatever happened — but a script has no other way to tell
+    # "the workflow concluded" from "it finished", and `waiting_approval` /
+    # `waiting_child` deliberately keep 0: those are pauses a human resumes, not
+    # outcomes.
+    if run["status"] == "failed":
+        return 1
     return 0
 
 
@@ -207,13 +249,17 @@ def cmd_chat(harness: Harness, args) -> int:
 
     try:
         if once:
-            outcome = asyncio.run(harness.converse(run_id, once))
-            _p(outcome["reply"])
+            reporter = _tool_reporter()
+            outcome = asyncio.run(harness.converse(run_id, once, on_tool=reporter))
+            reporter.flush()
+            print(outcome["reply"])
             _report_pending(outcome)
             return 0 if outcome["ok"] else 1
 
-        _p(f"交互会话 {run_id}   项目 {harness.cfg.project_root}")
-        _p("直接说你想做什么；exit / quit / Ctrl+C 结束。")
+        print(f"交互会话 {run_id}   项目 {harness.cfg.project_root}",
+              file=sys.stderr)
+        print("直接说你想做什么；exit / quit / Ctrl+C 结束。\n", file=sys.stderr)
+        reporter = _tool_reporter()
 
         async def session() -> None:
             # One event loop for the whole session, not one per turn: the gateway
@@ -235,11 +281,16 @@ def cmd_chat(harness: Harness, args) -> int:
                 if text in ("exit", "quit", ":q"):
                     return
                 try:
-                    outcome = await harness.converse(run_id, text)
+                    outcome = await harness.converse(run_id, text,
+                                                     on_tool=reporter)
                 except RunLockedError as e:
                     _p(f"（{e}）")
                     continue
+                finally:
+                    # Releases whatever run was still open when the turn ended.
+                    reporter.flush()
                 _p(outcome["reply"])
+                _p("")
                 _report_pending(outcome)
 
         asyncio.run(session())
@@ -250,7 +301,67 @@ def cmd_chat(harness: Harness, args) -> int:
         # would send `wfos approve` down `advance` into a machine that has no chat.
         if repo.get_run(run_id)["status"] not in ("completed", "failed", "cancelled"):
             repo.set_status(run_id, "completed")
-        _p(f"会话结束（{run_id}）。`wfos trace show {run_id}` 可回看全过程。")
+        if not once:
+            print(f"\n会话结束。`wfos trace show {run_id}` 可回看全过程。",
+                  file=sys.stderr)
+
+
+def _tool_text(name: str, args: dict) -> str:
+    """How one tool call reads on a line: name plus the argument a person scans for.
+
+    Picked by name rather than dumping the arguments — `path` and `pattern` are
+    what a reader recognises, and a JSON blob per call turns the transcript into
+    something you scroll past instead of read.
+    """
+    for key in ("path", "pattern", "command", "query", "text"):
+        value = (args or {}).get(key)
+        if value:
+            text = str(value)
+            # 48 keeps the whole line inside an 80-column terminal: the prefix and
+            # the tool name take about thirty, and a line that wraps reads as two
+            # actions rather than one.
+            if len(text) > 48:
+                text = text[:47] + "…"
+            return f"{name} {text}"
+    return name
+
+
+def _tool_reporter(stream=None):
+    """A callback that reports each *distinct* action once, as it happens.
+
+    A model looking around a real project calls the same tool with the same
+    arguments several times in a row — nine calls became five lines in one
+    measured run, three of them the identical `workspace.search`. Printing each
+    one is not information, it is noise with a timestamp.
+
+    Runs are therefore held until they end, so the count is known before the line
+    is written: `· workspace.read Equipment.cs ×3`. The cost is that a line
+    appears when the *next* distinct action starts, which is also when there was
+    anything new to say. `flush()` at the end of the turn releases the last one.
+    """
+    out = stream or sys.stderr
+    state: dict = {"sig": None, "count": 0, "text": "", "ok": True}
+
+    def flush() -> None:
+        if not state["count"]:
+            return
+        suffix = f" ×{state['count']}" if state["count"] > 1 else ""
+        mark = "·" if state["ok"] else "✗"
+        print(f"   {mark} {state['text']}{suffix}", file=out, flush=True)
+        state["sig"], state["count"] = None, 0
+
+    def report(name: str, args: dict, payload: dict) -> None:
+        ok = bool((payload or {}).get("ok", True))
+        text = _tool_text(name, args)
+        sig = (name, text, ok)
+        if sig == state["sig"]:
+            state["count"] += 1
+            return
+        flush()
+        state.update(sig=sig, count=1, text=text, ok=ok)
+
+    report.flush = flush          # type: ignore[attr-defined]
+    return report
 
 
 def _report_pending(outcome: dict) -> None:

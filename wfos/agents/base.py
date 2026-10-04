@@ -116,6 +116,23 @@ class BaseAgent:
     # the interactive one is told to answer a person. Overridable so `run()` stays
     # one loop rather than two.
     opening_prompt = "请依据上述上下文完成本阶段任务，并输出符合输出要求的 JSON 对象。"
+    # Whether the final round is spent with no tools offered, so the model has to
+    # answer instead of looking at one more thing. Off by default: a state that
+    # cannot finish **must fail**, and forcing an answer out of it would let an
+    # implementer describe changes it never made. A conversation is the opposite
+    # case — a partial answer is the useful outcome, and an error is not.
+    answers_without_tools = False
+
+    def answer_from_text(self, text: str) -> dict[str, Any]:
+        """The output to return when the round budget ran out mid-investigation.
+
+        Overridden by an agent that sets `answers_without_tools`; the base class
+        has no idea what shape its subclass would want, and inventing one here
+        would be the base class deciding a subclass's schema.
+        """
+        raise AgentError(
+            f"{self.role} 在 {self.max_rounds} 轮内未产出结构化输出",
+            wire_code=WIRE_OUTPUT_MALFORMED)
 
     def __init__(self, llm: LLMAdapter, gateway: ToolGateway, project_root: str | Path = ".",
                  *, repeated_call_threshold: int | None = None,
@@ -484,16 +501,32 @@ class BaseAgent:
         record["usage"], record["model_calls"], record["latency_ms"] = {}, 0, 0
 
         for rnd in range(self.max_rounds):
+            # The last round, for an agent that can answer without tools, drops the
+            # tool list. Nothing else stops a model that keeps finding one more
+            # thing to look at: it calls tools until the budget is gone and the
+            # turn ends in an error, having said nothing. Observed on a real
+            # project — twelve rounds, twenty-four tool calls, no answer. Taking
+            # the tools away is what turns "ran out" into "answered, having looked
+            # at what it had time to look at".
+            forced = self.answers_without_tools and rnd == self.max_rounds - 1
             started = time.monotonic()
             result = await self.llm.complete(
                 messages=messages, schema=self.output_schema,
-                tools=tools or None, ctx=ctx)
+                tools=None if forced else (tools or None), ctx=ctx)
             latency_ms += int((time.monotonic() - started) * 1000)
             model_calls += 1
             _accumulate_usage(usage_totals, usage_reported, result.usage)
             record["usage"] = {f: usage_totals[f] for f in usage_reported}
             record["model_calls"] = model_calls
             record["latency_ms"] = latency_ms
+            if forced and result.output is None:
+                # Checked **before** the tool-call branch, not after: a model that
+                # was handed no tools may still answer with a tool call, and the
+                # branch below would execute it and `continue` straight past the
+                # end of the loop. No tools were offered, so a call here answers a
+                # question nobody asked — whatever prose came back is the answer.
+                last_wire = WIRE_OUTPUT_MALFORMED
+                return self.answer_from_text(result.text or "")
             if result.tool_calls:
                 # The assistant turn goes in BEFORE any result does. A tool result
                 # has to answer a `tool_call` in the preceding assistant message,
@@ -544,6 +577,14 @@ class BaseAgent:
                             payload = outcome.structured
                             if payload is None:
                                 payload = {"ok": outcome.ok, "error": outcome.error}
+                    # A caller that wants to watch the turn happen — the
+                    # interactive CLI does — gets told here, where all three
+                    # outcomes (executed / refused / repeated) have already been
+                    # folded into one payload. Optional by construction: a harness
+                    # run passes nothing and pays nothing.
+                    observer = ctx.get("on_tool")
+                    if callable(observer):
+                        observer(tc.name, tc.arguments, payload)
                     # Tool specs allow up to 200k chars of output; uncapped, a
                     # couple of test runs would crowd out everything else.
                     messages.append({

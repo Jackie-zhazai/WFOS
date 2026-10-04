@@ -198,3 +198,93 @@ def test_an_existing_baseline_is_not_overwritten(env, tmp_path):
 
     assert proc.returncode != 0
     assert target.read_text(encoding="utf-8") == '{"sentinel": true}'
+
+
+# ------------------------------------------------- 失败要说清楚是哪一种失败
+def _failed_run(app, *, error="", suggest=None, transition=None):
+    """A run in the shape the two kinds of failure actually leave behind."""
+    h, repo = app["harness"], app["repo"]
+    run = h.create_run("登录报错，结果不对", kind="bugfix")
+    if suggest is not None:
+        repo.add_step(run["id"], "history_search", "investigator",
+                      {"next_step": suggest}, status="done")
+    if transition is not None:
+        repo.add_transition(run["id"], "history_search", "failed", "harness",
+                            transition, "failed")
+    repo.set_status(run["id"], "failed")
+    if error:
+        repo.update_run(run["id"], error=error)
+    return repo.get_run(run["id"])
+
+
+def test_a_failed_run_says_why_it_stopped(app, capsys):
+    """The workflow's own verdict. Before this it printed `状态=failed` and the
+    reason — the only part that says whether anything needs doing — was reachable
+    only by opening the database."""
+    from wfos.cli import _show_run
+
+    run = _failed_run(app, suggest={"suggested_state": "failed",
+                                    "reason": "历史检索已穷尽：现象无法映射到任何源码锚点"})
+
+    _show_run(app["harness"], run)
+    out = capsys.readouterr().out
+
+    assert "终止原因" in out
+    assert "历史检索已穷尽" in out
+    assert f"wfos trace show {run['id']}" in out
+
+
+def test_a_crash_does_not_read_like_a_verdict(app, capsys):
+    """Two failures that want opposite responses, named apart on purpose."""
+    from wfos.cli import _show_run
+
+    _show_run(app["harness"], _failed_run(app, error="verifier 在 6 轮内未产出结构化输出"))
+    out = capsys.readouterr().out
+
+    assert "执行出错" in out and "verifier" in out
+    assert "流程判定终止" not in out
+
+
+def test_a_refused_transition_says_which_move_was_refused(app, capsys):
+    from wfos.cli import _show_run
+
+    _show_run(app["harness"], _failed_run(
+        app, transition="状态 history_search → deploy 不是合法转换（允许: ['evidence_collect', 'failed']）"))
+    out = capsys.readouterr().out
+
+    assert "迁移被拒" in out and "deploy" in out
+
+
+def test_a_missing_reason_is_stated_not_invented(app, capsys):
+    from wfos.cli import _show_run
+
+    _show_run(app["harness"], _failed_run(app))
+    out = capsys.readouterr().out
+
+    assert "无终止原因" in out
+
+
+def test_a_failed_run_exits_nonzero_but_a_pause_does_not(app, monkeypatch):
+    """A script has no other way to tell "the workflow concluded" from "it
+    finished" — and a pause is neither: it is waiting for a person."""
+    import argparse
+
+    from wfos import cli
+
+    def advance_then(status):
+        def fake(harness, run_id):
+            harness.repo.set_status(run_id, status)
+            return harness.repo.get_run(run_id)
+        return fake
+
+    args = argparse.Namespace(text=["新增一个模块，改 app.py"], kind="feature",
+                              title=None, json=False)
+
+    monkeypatch.setattr(cli, "_advance", advance_then("failed"))
+    assert cli.cmd_run(app["harness"], args) == 1
+
+    monkeypatch.setattr(cli, "_advance", advance_then("completed"))
+    assert cli.cmd_run(app["harness"], args) == 0
+
+    monkeypatch.setattr(cli, "_advance", advance_then("waiting_approval"))
+    assert cli.cmd_run(app["harness"], args) == 0

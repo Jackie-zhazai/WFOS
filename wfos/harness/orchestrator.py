@@ -345,9 +345,14 @@ class Harness:
                  for t in turns]
         return "\n".join(lines)
 
-    async def converse(self, run_id: str, text: str) -> dict:
+    async def converse(self, run_id: str, text: str, *, on_tool=None) -> dict:
         """One turn of an interactive session: record what was asked, let the
         assistant work, record what it answered.
+
+        `on_tool(name, args, payload)` is called for every tool call the turn
+        makes, as it happens. A caller that wants to show progress passes one; the
+        harness never does, because a run's progress belongs in its trace and not
+        on somebody's stdout.
 
         Not a state transition, and deliberately not routed through `advance`: a
         conversation has no machine to move through. Everything else is the same
@@ -382,12 +387,12 @@ class Harness:
                     f"（租约至 {held.get('lease_until')}），本次未执行任何一轮")
             heartbeat = _LeaseHeartbeat(self.repo, run_id, owner, lease_seconds)
             try:
-                return await self._converse_claimed(run, text)
+                return await self._converse_claimed(run, text, on_tool=on_tool)
             finally:
                 await heartbeat.stop()
                 self.repo.release_run(run_id, owner)
 
-    async def _converse_claimed(self, run: dict, text: str) -> dict:
+    async def _converse_claimed(self, run: dict, text: str, *, on_tool=None) -> dict:
         run_id = run["id"]
         self.repo.set_status(run_id, "running")
         # The person's words go in first: everything after this point is the
@@ -403,6 +408,8 @@ class Harness:
         history = self.chat_history(run_id)
         if history:
             ctx["conversation"] = self._render_conversation(history)
+        if on_tool is not None:
+            ctx["on_tool"] = on_tool
 
         failure = ""
         try:
@@ -423,8 +430,11 @@ class Harness:
             {"reply": reply, **({"failed": True} if failure else {})},
             status="failed" if failure else "done", error=failure or None,
             failure_class="agent_no_output" if failure else None,
+            # `on_tool` is excluded for the same reason `gateway` is: it is a live
+            # object, not a fact about the run, and a step record that cannot be
+            # serialized is a step record that cannot be written at all.
             input_json={k: v for k, v in ctx.items()
-                        if k not in ("gateway", RUN_RECORD)},
+                        if k not in ("gateway", "on_tool", RUN_RECORD)},
             event_id=event_id, metrics=self._step_metrics(self.chat_agent, record))
 
         blocked = self._request_approvals_for(run, since=before)
